@@ -1,14 +1,25 @@
 """
 game-ping.kr WebGL 게임 자동 업로드 스크립트
-- 이메일/패스워드로 로그인
-- 게임 등록 플로우 (Step 1 → Step 2 → 완료)
-- 개인/팀 게시자 선택 지원
-- 디렉토리/파일이 ZIP이 아니면 자동 압축 후 업로드
+
+신규 게임: /game-registration 플로우 (Step1 → Step2 → ...)
+기존 게임: /games/{slug}/edit 플로우 (편집 페이지에서 WebGL만 교체)
+
+환경변수:
+  GAME_PING_EMAIL    (필수) 로그인 이메일
+  GAME_PING_PASSWORD (필수) 로그인 패스워드
+  GAME_SLUG          (필수) 게임 slug (예: my-awesome-game)
+  WEBGL_ZIP_PATH     (선택) 업로드 경로, 기본값 build.zip
+  GAME_TITLE         (선택) 게임 제목, 없으면 slug → Title Case 변환
+  GAME_VERSION       (선택) 버전, 없으면 신규=0.0.1 / 기존=현재버전 patch+1
+  PUBLISHER          (선택) personal(기본) 또는 team
+  TEAM_NAME          (선택) PUBLISHER=team일 때 팀 이름 (예: Team6515)
 """
 
 import os
 import sys
 import zipfile
+import re
+import requests
 from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
@@ -23,6 +34,44 @@ def take_screenshot(page, name: str):
     path = SCREENSHOT_DIR / f"{name}.png"
     page.screenshot(path=str(path))
     print(f"[screenshot] {path}")
+
+
+def slug_to_title(slug: str) -> str:
+    """my-awesome-game → My Awesome Game"""
+    return " ".join(word.capitalize() for word in re.split(r"[-_]+", slug))
+
+
+def increment_patch(version: str) -> str:
+    """0.1.3 → 0.1.4"""
+    parts = version.strip().lstrip("v").split(".")
+    if len(parts) == 3:
+        try:
+            parts[2] = str(int(parts[2]) + 1)
+            return ".".join(parts)
+        except ValueError:
+            pass
+    return version
+
+
+def get_current_version(slug: str) -> str | None:
+    """게임 페이지에서 현재 버전 읽기 (로그인 불필요)"""
+    try:
+        resp = requests.get(f"{BASE_URL}/games/{slug}", timeout=10)
+        match = re.search(r"v(\d+\.\d+\.\d+)", resp.text)
+        if match:
+            return match.group(1)
+    except Exception:
+        pass
+    return None
+
+
+def game_exists(slug: str) -> bool:
+    """게임이 이미 등록되어 있는지 확인"""
+    try:
+        resp = requests.get(f"{BASE_URL}/games/{slug}", timeout=10, allow_redirects=True)
+        return resp.status_code == 200 and "/not-found" not in resp.url
+    except Exception:
+        return False
 
 
 def resolve_zip(path_str: str) -> Path:
@@ -75,159 +124,220 @@ def login(page, email: str, password: str):
     take_screenshot(page, "03_after_login")
 
 
-def step1_select_file_type(page, publisher: str):
+# ─────────────────────────────────────────────
+# 신규 게임 플로우
+# ─────────────────────────────────────────────
+
+def new_game_step1(page, publisher: str, team_name: str):
     """Step 1: 웹 게임 빌드 선택 + 게시자(개인/팀) 선택"""
-    print("[step1] 게임 파일 타입 선택...")
+    print("[new/step1] 게임 파일 타입 및 게시자 선택...")
     page.goto(REGISTER_URL)
     page.wait_for_load_state("networkidle")
     take_screenshot(page, "04_step1")
 
     # 웹 게임 빌드 선택
     page.get_by_role("button", name="웹 게임 빌드").click()
-    print("[step1] 웹 게임 빌드 선택 완료")
 
-    # 게시자 선택 (개인/팀)
-    # 현재 게시자 버튼 클릭하여 드롭다운 열기
-    publisher_btn = page.locator("button").filter(has_text="dev-yunseong").or_(
+    # 게시자 드롭다운 열기
+    page.locator("button").filter(has_text="dev-yunseong").or_(
         page.locator("button").filter(has_text="Team")
-    ).first
-    publisher_btn.click()
+    ).first.click()
     page.wait_for_timeout(500)
 
-    if publisher.lower() in ("team", "팀"):
-        # 팀 선택
-        popup = page.locator('[data-slot="popover-content"]')
-        popup.get_by_role("button").filter(has_text="Team6515").click()
-        print("[step1] 게시자: Team6515 선택")
+    popup = page.locator('[data-slot="popover-content"]')
+    if publisher == "team":
+        popup.get_by_role("button").filter(has_text=team_name).click()
+        print(f"[new/step1] 게시자: {team_name} (팀) 선택")
     else:
-        # 개인 선택 (dev-yunseong)
-        popup = page.locator('[data-slot="popover-content"]')
         popup.get_by_role("button").filter(has_text="dev-yunseong").click()
-        print("[step1] 게시자: dev-yunseong (개인) 선택")
+        print("[new/step1] 게시자: dev-yunseong (개인) 선택")
 
-    take_screenshot(page, "04_step1_selected")
-
-    # 다음 단계로
+    take_screenshot(page, "04_step1_done")
     page.get_by_role("button", name="다음").click()
     page.wait_for_load_state("networkidle")
-    print("[step1] 완료 → Step 2로 이동")
+    print("[new/step1] 완료 → Step 2")
     take_screenshot(page, "05_step2")
 
 
-def step2_fill_info(page, game_title: str, game_slug: str, version: str, zip_path: Path):
+def new_game_step2(page, game_title: str, game_slug: str, version: str, zip_path: Path):
     """Step 2: 기본 정보 입력 + WebGL ZIP 업로드"""
-    print("[step2] 기본 정보 입력 중...")
+    print("[new/step2] 기본 정보 입력 중...")
 
-    # 게임 제목
-    title_input = page.locator("input#title")
-    title_input.fill(game_title)
-    print(f"[step2] 제목: {game_title}")
+    page.locator("input#title").fill(game_title)
+    page.locator("input#slug").fill(game_slug)
 
-    # 슬러그
-    slug_input = page.locator("input#slug")
-    slug_input.fill(game_slug)
-    print(f"[step2] 슬러그: {game_slug}")
-
-    # 버전 (major.minor.patch)
     parts = version.split(".")
-    major = parts[0] if len(parts) > 0 else "0"
-    minor = parts[1] if len(parts) > 1 else "0"
-    patch = parts[2] if len(parts) > 2 else "1"
-    page.locator("input#version-major").fill(major)
-    page.locator("input#version-minor").fill(minor)
-    page.locator("input#version-patch").fill(patch)
-    print(f"[step2] 버전: {major}.{minor}.{patch}")
+    page.locator("input#version-major").fill(parts[0] if len(parts) > 0 else "0")
+    page.locator("input#version-minor").fill(parts[1] if len(parts) > 1 else "0")
+    page.locator("input#version-patch").fill(parts[2] if len(parts) > 2 else "1")
 
+    print(f"[new/step2] 제목={game_title}, slug={game_slug}, 버전={version}")
     take_screenshot(page, "06_step2_filled")
 
-    # WebGL ZIP 업로드 — Step2의 마지막 file input (500MB짜리)
-    print(f"[step2] WebGL ZIP 업로드 중: {zip_path} ({zip_path.stat().st_size // 1024} KB)")
+    # WebGL ZIP — 마지막 file input (500MB)
+    print(f"[new/step2] WebGL ZIP 업로드: {zip_path.name} ({zip_path.stat().st_size // 1024} KB)")
     file_inputs = page.locator("input[type='file']")
-    count = file_inputs.count()
-    # 마지막 file input이 WebGL ZIP용
-    webgl_input = file_inputs.nth(count - 1)
-    webgl_input.set_input_files(str(zip_path))
-    print("[step2] 파일 선택 완료, 업로드 대기 중...")
+    file_inputs.nth(file_inputs.count() - 1).set_input_files(str(zip_path))
 
-    # 업로드 완료 대기 (파일명이 나타날 때까지)
     try:
         page.wait_for_function(
             f"() => document.body.innerText.includes('{zip_path.name}')",
             timeout=300000
         )
-        print("[step2] 업로드 완료!")
+        print("[new/step2] 업로드 완료!")
     except PlaywrightTimeoutError:
-        print("[step2] 업로드 타임아웃 — 계속 진행합니다.")
+        print("[new/step2] 업로드 타임아웃 — 계속 진행합니다.")
 
     take_screenshot(page, "07_step2_uploaded")
-
-    # 다음 단계로
     page.get_by_role("button", name="다음").click()
     page.wait_for_load_state("networkidle")
-    print("[step2] 완료 → Step 3으로 이동")
-    take_screenshot(page, "08_step3")
+    print("[new/step2] 완료 → Step 3")
 
 
-def step3_finish(page):
-    """Step 3 이후: 소개글 등 나머지 단계를 건너뛰고 등록 완료"""
-    print("[step3+] 나머지 단계 처리 중...")
-    take_screenshot(page, "08_step3")
+def new_game_finish(page):
+    """Step 3+: 나머지 단계 완료"""
+    print("[new/step3+] 나머지 단계 처리 중...")
 
-    # 남은 단계를 '다음' 또는 '등록' 버튼으로 완료
-    for i in range(5):
-        finish_btn = page.locator("button").filter(has_text="등록").or_(
-            page.locator("button").filter(has_text="완료")
-        ).or_(
-            page.locator("button").filter(has_text="제출")
-        ).first
+    for i in range(10):
+        take_screenshot(page, f"08_step{3+i}")
 
-        if finish_btn.is_visible(timeout=2000):
-            finish_btn.click()
-            page.wait_for_load_state("networkidle")
-            print(f"[step3+] 완료 버튼 클릭!")
-            take_screenshot(page, "09_done")
-            return
+        for label in ["등록", "완료", "제출", "게시"]:
+            btn = page.get_by_role("button", name=label)
+            if btn.is_visible(timeout=1000):
+                btn.click()
+                page.wait_for_load_state("networkidle")
+                print(f"[new/step3+] '{label}' 버튼 클릭 → 완료!")
+                take_screenshot(page, "09_done")
+                return
 
         next_btn = page.get_by_role("button", name="다음")
-        if next_btn.is_visible(timeout=2000):
+        if next_btn.is_visible(timeout=1000):
             next_btn.click()
             page.wait_for_load_state("networkidle")
-            take_screenshot(page, f"08_step{3+i+1}")
         else:
             break
 
-    print("[step3+] 모든 단계 완료")
     take_screenshot(page, "09_final")
+    print("[new/step3+] 완료")
 
+
+# ─────────────────────────────────────────────
+# 기존 게임 편집 플로우
+# ─────────────────────────────────────────────
+
+def edit_game(page, game_slug: str, version: str, zip_path: Path):
+    """기존 게임 편집 페이지에서 WebGL 파일만 교체"""
+    edit_url = f"{BASE_URL}/games/{game_slug}/edit"
+    print(f"[edit] 편집 페이지 이동: {edit_url}")
+    page.goto(edit_url)
+    page.wait_for_load_state("networkidle")
+
+    if "/not-authorized" in page.url or "/not-found" in page.url:
+        take_screenshot(page, "error_edit_page")
+        raise RuntimeError(
+            f"편집 페이지 접근 불가: {page.url}\n"
+            "게임 소유자인지 확인하거나, GAME_SLUG를 확인하세요."
+        )
+
+    print(f"[edit] 편집 페이지 접근 성공: {page.url}")
+    take_screenshot(page, "04_edit_page")
+
+    # 버전 업데이트
+    major_input = page.locator("input#version-major")
+    if major_input.is_visible(timeout=3000):
+        parts = version.split(".")
+        page.locator("input#version-major").fill(parts[0] if len(parts) > 0 else "0")
+        page.locator("input#version-minor").fill(parts[1] if len(parts) > 1 else "0")
+        page.locator("input#version-patch").fill(parts[2] if len(parts) > 2 else "1")
+        print(f"[edit] 버전 업데이트: {version}")
+
+    # WebGL ZIP 교체
+    print(f"[edit] WebGL ZIP 업로드: {zip_path.name} ({zip_path.stat().st_size // 1024} KB)")
+    file_inputs = page.locator("input[type='file']")
+    count = file_inputs.count()
+    if count == 0:
+        take_screenshot(page, "error_no_file_input")
+        raise RuntimeError("파일 업로드 input을 찾을 수 없습니다.")
+
+    file_inputs.nth(count - 1).set_input_files(str(zip_path))
+
+    try:
+        page.wait_for_function(
+            f"() => document.body.innerText.includes('{zip_path.name}')",
+            timeout=300000
+        )
+        print("[edit] 업로드 완료!")
+    except PlaywrightTimeoutError:
+        print("[edit] 업로드 타임아웃 — 저장 진행합니다.")
+
+    take_screenshot(page, "05_edit_uploaded")
+
+    # 저장
+    for label in ["저장", "업데이트", "수정 완료", "다음"]:
+        btn = page.get_by_role("button", name=label)
+        if btn.is_visible(timeout=2000):
+            btn.click()
+            page.wait_for_load_state("networkidle")
+            print(f"[edit] '{label}' 버튼 클릭 → 저장 완료!")
+            take_screenshot(page, "06_saved")
+            return
+
+    take_screenshot(page, "error_no_save_button")
+    raise RuntimeError("저장 버튼을 찾을 수 없습니다. 스크린샷을 확인하세요.")
+
+
+# ─────────────────────────────────────────────
+# main
+# ─────────────────────────────────────────────
 
 def main():
     email = os.environ.get("GAME_PING_EMAIL")
     password = os.environ.get("GAME_PING_PASSWORD")
     game_slug = os.environ.get("GAME_SLUG")
-    game_title = os.environ.get("GAME_TITLE", game_slug)
-    version = os.environ.get("GAME_VERSION", "0.0.1")
     zip_path_str = os.environ.get("WEBGL_ZIP_PATH", "build.zip")
-    publisher = os.environ.get("PUBLISHER", "personal")  # "personal" 또는 "team"
+    publisher = os.environ.get("PUBLISHER", "personal").lower()
+    team_name = os.environ.get("TEAM_NAME", "")
 
     missing = [k for k, v in {
         "GAME_PING_EMAIL": email,
         "GAME_PING_PASSWORD": password,
         "GAME_SLUG": game_slug,
     }.items() if not v]
-
     if missing:
         print(f"[error] 필수 환경변수가 없습니다: {', '.join(missing)}")
         sys.exit(1)
 
-    print(f"[start] game-ping.kr CI/CD 업로드 시작")
-    print(f"  게임 slug  : {game_slug}")
-    print(f"  게임 제목  : {game_title}")
-    print(f"  버전       : {version}")
-    print(f"  게시자     : {publisher}")
-    print(f"  입력 경로  : {zip_path_str}")
+    if publisher == "team" and not team_name:
+        print("[error] PUBLISHER=team 일 때 TEAM_NAME이 필요합니다.")
+        sys.exit(1)
+
+    # 게임 존재 여부 확인
+    is_existing = game_exists(game_slug)
+    print(f"[check] 게임 '{game_slug}' 존재 여부: {'기존 게임 (편집 모드)' if is_existing else '신규 게임 (등록 모드)'}")
+
+    # game_title 자동 변환
+    game_title = os.environ.get("GAME_TITLE", "") or slug_to_title(game_slug)
+
+    # version 자동 결정
+    game_version = os.environ.get("GAME_VERSION", "")
+    if not game_version:
+        if is_existing:
+            current = get_current_version(game_slug)
+            game_version = increment_patch(current) if current else "0.0.1"
+            print(f"[version] 현재 버전 감지: {current} → {game_version}")
+        else:
+            game_version = "0.0.1"
+            print(f"[version] 신규 게임 기본 버전: {game_version}")
+
+    print(f"[start] game-ping.kr CI/CD 시작")
+    print(f"  slug      : {game_slug}")
+    print(f"  title     : {game_title}")
+    print(f"  version   : {game_version}")
+    print(f"  publisher : {publisher}{f' ({team_name})' if publisher == 'team' else ''}")
+    print(f"  입력 경로 : {zip_path_str}")
 
     zip_path = resolve_zip(zip_path_str)
-    print(f"  업로드 ZIP : {zip_path}")
+    print(f"  ZIP 경로  : {zip_path}")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -242,9 +352,14 @@ def main():
 
         try:
             login(page, email, password)
-            step1_select_file_type(page, publisher)
-            step2_fill_info(page, game_title, game_slug, version, zip_path)
-            step3_finish(page)
+
+            if is_existing:
+                edit_game(page, game_slug, game_version, zip_path)
+            else:
+                new_game_step1(page, publisher, team_name)
+                new_game_step2(page, game_title, game_slug, game_version, zip_path)
+                new_game_finish(page)
+
             print("[done] 배포 완료!")
         except Exception as e:
             take_screenshot(page, "error")
