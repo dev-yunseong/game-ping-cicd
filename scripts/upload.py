@@ -2,12 +2,13 @@
 game-ping.kr WebGL 게임 자동 업로드 스크립트
 - 이메일/패스워드로 로그인
 - 내 게임 목록에서 대상 게임 찾기
-- WebGL ZIP 파일 업로드
+- 디렉토리/파일이 ZIP이 아니면 자동 압축 후 업로드
 """
 
 import os
 import sys
 import time
+import zipfile
 from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
@@ -21,6 +22,40 @@ def take_screenshot(page, name: str):
     path = SCREENSHOT_DIR / f"{name}.png"
     page.screenshot(path=str(path))
     print(f"[screenshot] {path}")
+
+
+def resolve_zip(path_str: str) -> Path:
+    """
+    입력 경로가 ZIP이 아니면 자동으로 압축해서 ZIP 경로를 반환.
+    - 디렉토리 → 내부 파일 전체를 ZIP으로 압축
+    - .zip 외 단일 파일 → 해당 파일을 ZIP으로 감싸기
+    - .zip 파일 → 그대로 반환
+    """
+    src = Path(path_str).resolve()
+
+    if not src.exists():
+        raise FileNotFoundError(f"경로를 찾을 수 없습니다: {src}")
+
+    if src.suffix.lower() == ".zip":
+        print(f"[zip] ZIP 파일 확인: {src} ({src.stat().st_size // 1024} KB)")
+        return src
+
+    out_zip = src.parent / (src.stem + "_build.zip") if src.is_file() else src.parent / (src.name + ".zip")
+
+    if src.is_dir():
+        print(f"[zip] 디렉토리 압축 중: {src} → {out_zip}")
+        with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+            for file in sorted(src.rglob("*")):
+                if file.is_file():
+                    zf.write(file, file.relative_to(src))
+        print(f"[zip] 압축 완료: {out_zip.stat().st_size // 1024} KB ({sum(1 for _ in src.rglob('*') if _.is_file())} 파일)")
+    else:
+        print(f"[zip] 단일 파일 압축 중: {src} → {out_zip}")
+        with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.write(src, src.name)
+        print(f"[zip] 압축 완료: {out_zip.stat().st_size // 1024} KB")
+
+    return out_zip
 
 
 def login(page, email: str, password: str):
@@ -257,7 +292,10 @@ def main():
 
     print(f"[start] game-ping.kr CI/CD 업로드 시작")
     print(f"  게임 slug : {game_slug}")
-    print(f"  ZIP 경로  : {zip_path}")
+    print(f"  입력 경로  : {zip_path}")
+
+    zip_path = resolve_zip(zip_path)
+    print(f"  업로드 ZIP : {zip_path}")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(

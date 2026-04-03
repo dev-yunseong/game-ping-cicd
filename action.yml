@@ -17,7 +17,7 @@ inputs:
     description: '업로드할 게임의 slug (예: my-awesome-game)'
     required: true
   zip_path:
-    description: '업로드할 WebGL ZIP 파일 경로'
+    description: '업로드할 WebGL 경로 (ZIP 파일, 디렉토리, 단일 파일 모두 가능 — ZIP이 아니면 자동 압축)'
     required: false
     default: 'build.zip'
 
