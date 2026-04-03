@@ -49,8 +49,32 @@ runs:
       shell: bash
       run: |
         pip install -r ${{ github.action_path }}/requirements.txt
+        # Ubuntu 24.04(Noble)에서 libasound2 → libasound2t64로 패키지명 변경됨
+        # playwright install-deps가 실패하므로 수동으로 의존성 설치
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends \
+          libasound2t64 \
+          libatk-bridge2.0-0 \
+          libatk1.0-0 \
+          libcairo2 \
+          libcups2 \
+          libdbus-1-3 \
+          libdrm2 \
+          libgbm1 \
+          libglib2.0-0 \
+          libnspr4 \
+          libnss3 \
+          libpango-1.0-0 \
+          libx11-6 \
+          libxcb1 \
+          libxcomposite1 \
+          libxdamage1 \
+          libxext6 \
+          libxfixes3 \
+          libxkbcommon0 \
+          libxrandr2 \
+          xvfb
         playwright install chromium
-        playwright install-deps chromium
 
     - name: WebGL 업로드 실행
       shell: bash
