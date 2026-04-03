@@ -1,0 +1,54 @@
+name: 'game-ping.kr Deploy'
+description: 'game-ping.kr에 WebGL 게임을 자동으로 업로드합니다.'
+author: 'dev-yunseong'
+
+branding:
+  icon: 'upload-cloud'
+  color: 'purple'
+
+inputs:
+  email:
+    description: 'game-ping.kr 로그인 이메일'
+    required: true
+  password:
+    description: 'game-ping.kr 로그인 패스워드'
+    required: true
+  game_slug:
+    description: '업로드할 게임의 slug (예: my-awesome-game)'
+    required: true
+  zip_path:
+    description: '업로드할 WebGL ZIP 파일 경로'
+    required: false
+    default: 'build.zip'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Python 설치
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Playwright 설치
+      shell: bash
+      run: |
+        pip install -r ${{ github.action_path }}/requirements.txt
+        playwright install chromium
+        playwright install-deps chromium
+
+    - name: WebGL 업로드 실행
+      shell: bash
+      env:
+        GAME_PING_EMAIL: ${{ inputs.email }}
+        GAME_PING_PASSWORD: ${{ inputs.password }}
+        GAME_SLUG: ${{ inputs.game_slug }}
+        WEBGL_ZIP_PATH: ${{ inputs.zip_path }}
+      run: python ${{ github.action_path }}/scripts/upload.py
+
+    - name: 스크린샷 업로드 (디버깅용)
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: game-ping-screenshots-${{ github.run_number }}
+        path: screenshots/
+        retention-days: 7
