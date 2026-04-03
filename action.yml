@@ -20,6 +20,18 @@ inputs:
     description: '업로드할 WebGL 경로 (ZIP 파일, 디렉토리, 단일 파일 모두 가능 — ZIP이 아니면 자동 압축)'
     required: false
     default: 'build.zip'
+  game_title:
+    description: '게임 제목 (비우면 game_slug 값 사용)'
+    required: false
+    default: ''
+  game_version:
+    description: '게임 버전 (예: 0.1.0)'
+    required: false
+    default: '0.0.1'
+  publisher:
+    description: '게시자 선택: personal(개인) 또는 team(팀)'
+    required: false
+    default: 'personal'
 
 runs:
   using: 'composite'
@@ -42,6 +54,9 @@ runs:
         GAME_PING_EMAIL: ${{ inputs.email }}
         GAME_PING_PASSWORD: ${{ inputs.password }}
         GAME_SLUG: ${{ inputs.game_slug }}
+        GAME_TITLE: ${{ inputs.game_title }}
+        GAME_VERSION: ${{ inputs.game_version }}
+        PUBLISHER: ${{ inputs.publisher }}
         WEBGL_ZIP_PATH: ${{ inputs.zip_path }}
       run: python ${{ github.action_path }}/scripts/upload.py
 
